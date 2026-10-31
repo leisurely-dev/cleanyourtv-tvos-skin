@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project is a patch against CleanYourTV, which is also MIT licensed:
-
-    Copyright (c) 2026 Gathin
-
-The patch modifies files that carry that notice, and those files stay under it.
-The Outfit typeface the launcher bundles is copyright The Outfit Project Authors
-and licensed under the SIL Open Font License 1.1; it is not redistributed here.
