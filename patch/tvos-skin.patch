@@ -1,0 +1,1183 @@
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java b/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
+index 555fd4c6..b609bf6e 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
+@@ -80,6 +80,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         int ambient;
+         /** uniform_tiles card fill, top and bottom colour; null until sampled from the icon. */
+         int[] backdrop;
++        /** How much the icon is scaled up so its plate fills the same share of every tile (1 = as drawn). */
++        float iconZoom = 1f;
++        /** The icon has an opaque plate that can be clipped to the tile's rounded square. */
++        boolean iconClip;
+ 
+         Entry(String label, ComponentName component, Drawable banner, Drawable icon) {
+             this(APP, label, component, banner, icon, null, 0);
+@@ -218,6 +222,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+     private final Map<String, String> appLabels, appBanners;
+     /** Every app tile is its icon on a card tinted from that icon, never its banner (config.xml, uniform_tiles). */
+     private final boolean uniformTiles;
++    /** glass_style "glass": the focused tile itself turns to frosted glass over the wallpaper. */
++    private final boolean liquidGlass;
+     /** Packages drawn from their icon and name even when they have a banner (config.xml icon_tiles). */
+     private final Set<String> iconTiles;
+     private final List<Entry> items = new ArrayList<>();
+@@ -248,6 +254,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         this.appLabels = cfg.appLabels;
+         this.appBanners = cfg.appBanners;
+         this.uniformTiles = cfg.uniformTiles;
++        this.liquidGlass = Config.GLASS_DEFAULT.equals(cfg.glassStyle);
+         // Tiles keep their identity across reload(), so a focused tile stays on its app instead of
+         // its view being rebound to whatever app now sits in that slot.
+         setHasStableIds(true);
+@@ -441,6 +448,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+             iconLp.width = iconLp.height = Math.round(h * ICON_SHARE);
+             iconLp.bottomMargin = 0;
+             icon.setLayoutParams(iconLp);
++            // Every icon is clipped to the same rounded square, whatever artwork it brings: one rule for all
++            // tiles, including apps installed later, instead of a redrawn icon per app.
++            icon.setOutlineProvider(new ViewOutlineProvider() {
++                @Override
++                public void getOutline(View view, Outline outline) {
++                    float radius = view.getWidth() * ICON_RADIUS;
++                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radius);
++                }
++            });
+         } else if (h < Math.round(DESIGN_H_DP * density)) {
+             // Shrunk tiles (e.g. 5 or 6 columns): scale icon and bottom margin proportionally with tile height so the label does not overlap the icon.
+             View icon = v.findViewById(R.id.icon);
+@@ -452,7 +468,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+             View label = v.findViewById(R.id.label);
+             label.setPadding(label.getPaddingLeft(), label.getPaddingTop(), label.getPaddingRight(), Math.round(4f * density));
+         }
+-        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot);
++        Holder holder = new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot);
++        // The slab the focused tile turns into: it samples the wallpaper behind it as it draws, so it needs no
++        // per-tile state beyond the tile it belongs to.
++        if (liquidGlass) holder.plate = new GlassPlateDrawable(card, cornerRadius(w, density));
++        return holder;
+     }
+ 
+     @Override
+@@ -490,11 +510,33 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         h.banner.setScaleY(focused && advancedEffects ? 1.035f : 1f);
+         // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
+         // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
+-        h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
++        Drawable rest = e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground;
++        int plateBase = 0;
+         if (uniformTiles && e.banner == null) {
+-            if (e.backdrop == null) e.backdrop = backdrop(e.icon, ambientColorAt(position));
+-            h.card.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop));
++            if (e.backdrop == null) {
++                e.backdrop = backdrop(e.icon, ambientColorAt(position));
++                // One sizing rule for every app: a plate is scaled until it fills the tile, a bare mark is not.
++                float cover = plateCoverage(e.icon);
++                if (cover >= 0.55f) {
++                    e.iconZoom = Math.min(1.55f, 1f / cover);
++                    e.iconClip = true;
++                }
++            }
++            rest = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop);
++            plateBase = e.backdrop[0];
++            int tileH = h.card.getLayoutParams().height;
++            int iconSize = Math.min(tileH, Math.round(tileH * ICON_SHARE * e.iconZoom));
++            ViewGroup.LayoutParams iconLp = h.icon.getLayoutParams();
++            if (iconLp.width != iconSize || iconLp.height != iconSize) {
++                iconLp.width = iconLp.height = iconSize;
++                h.icon.setLayoutParams(iconLp);
++            }
++            h.icon.setClipToOutline(e.iconClip);
+         }
++        h.restBackground = rest;
++        h.plateBase = plateBase;
++        if (h.plate != null) h.applyGlass(focused);
++        else h.card.setBackground(rest);
+         if (e.banner != null) {
+             h.banner.setImageDrawable(e.banner);
+             h.banner.setVisibility(View.VISIBLE);
+@@ -692,6 +734,41 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+     /** Share of the tile height the icon takes in uniform_tiles mode (onCreateViewHolder). */
+     private static final float ICON_SHARE = 0.62f;
+ 
++    /** Corner radius of the icon's rounded square, as a share of its side (the iOS icon's ratio). */
++    private static final float ICON_RADIUS = 0.225f;
++
++    /**
++     * How much of its square an icon's artwork covers, from the bounding box of its opaque pixels.
++     *
++     * App icons come in every shape: some are plates that fill their square, some are plates with wide
++     * transparent margins, some are a bare mark on transparency. Measuring the artwork lets one rule size them
++     * all — plates are scaled until they fill the tile, bare marks are left alone — so the grid stays even
++     * without anyone hand-tuning a single app, and an app installed tomorrow is treated the same way.
++     */
++    private static float plateCoverage(Drawable live) {
++        if (live == null) return 0f;
++        Drawable d = live.getConstantState() != null ? live.getConstantState().newDrawable().mutate() : live;
++        Rect saved = new Rect(d.getBounds());
++        int n = 32;
++        Bitmap bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
++        d.setBounds(0, 0, n, n);
++        d.draw(new Canvas(bmp));
++        d.setBounds(saved);
++        int minX = n, minY = n, maxX = -1, maxY = -1;
++        for (int y = 0; y < n; y++) {
++            for (int x = 0; x < n; x++) {
++                if (Color.alpha(bmp.getPixel(x, y)) < 200) continue;
++                if (x < minX) minX = x;
++                if (x > maxX) maxX = x;
++                if (y < minY) minY = y;
++                if (y > maxY) maxY = y;
++            }
++        }
++        bmp.recycle();
++        if (maxX < minX) return 0f;
++        return Math.max(maxX - minX + 1, maxY - minY + 1) / (float) n;
++    }
++
+     /**
+      * The colour covering most of an icon, for a card that should read as that app: a small saturated badge
+      * (a red "new" corner on a blue icon) must not win, as it can with {@link #vividColor}. Grey if none.
+@@ -915,6 +992,20 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         final boolean overshoot;
+         /** A dock tile: it grows in place without advanced_effects' lift, which reads as off-centre in the band (#2135). */
+         boolean inDock;
++        /** The focused tile's frosted slab, or null when glass_style is not "glass" (or there is no wallpaper). */
++        GlassPlateDrawable plate;
++        /** What the card is filled with while it is not focused (a banner tile may have none). */
++        Drawable restBackground;
++        /** The app's tile colour, kept faintly under the slab so the focused tile still reads as that app. */
++        int plateBase;
++
++        /** Focused tiles become a pane of glass; the others keep their own fill. */
++        void applyGlass(boolean focused) {
++            if (plate == null) return;
++            plate.setBaseColor(plateBase);
++            plate.setEmphasis(focused ? 1f : 0f);
++            card.setBackground(plate);
++        }
+ 
+         Holder(View v, TileListener listener, boolean animations, boolean advancedEffects,
+                boolean reducedMotion, float restNameAlpha, boolean overshoot) {
+@@ -953,6 +1044,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+                 view.animate().cancel();
+                 banner.animate().cancel();
+                 name.animate().cancel();
++                applyGlass(focused);
+                 float scale = !animations ? 1f : advancedEffects ? 1.12f : 1.10f;
+                 float s = focused ? scale : 1f;
+                 if (!animations) {
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/AppLibraryDialog.java b/launcher/app/src/main/java/com/gathin/tvhome/AppLibraryDialog.java
+index 3733b517..d7d70740 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/AppLibraryDialog.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/AppLibraryDialog.java
+@@ -31,7 +31,7 @@ import androidx.annotation.NonNull;
+ import androidx.dynamicanimation.animation.FloatPropertyCompat;
+ import androidx.dynamicanimation.animation.SpringAnimation;
+ import androidx.dynamicanimation.animation.SpringForce;
+-import androidx.recyclerview.widget.LinearLayoutManager;
++import androidx.recyclerview.widget.GridLayoutManager;
+ import androidx.recyclerview.widget.RecyclerView;
+ 
+ import java.text.Collator;
+@@ -101,6 +101,10 @@ final class AppLibraryDialog {
+     private GlassView highlight;
+     private SpringAnimation spring;
+     private float scrollOffset;
++    /** Vertical scroll, so the glass follows the card down a column as well as across a row. */
++    private float scrollOffsetY;
++    /** Cards across the grid: the catalogue scrolls down, not sideways (a long catalogue was hard to search). */
++    private int columnsCount;
+     private boolean highlightShown;
+     private final int catalogWidth;
+ 
+@@ -133,7 +137,7 @@ final class AppLibraryDialog {
+         GradientDrawable bg = new GradientDrawable();
+         bg.setColor(color);
+         bg.setCornerRadius(dp(radius));
+-        bg.setStroke(dp(1), 0x18FFFFFF);
++        bg.setStroke(dp(1), 0x26FFFFFF);
+         return bg;
+     }
+ 
+@@ -165,9 +169,11 @@ final class AppLibraryDialog {
+         panel.setPadding(dp(12), dp(8), dp(12), dp(12));
+         panel.setBackgroundResource(R.drawable.glass_panel);
+         View decor = activity.getWindow().getDecorView();
+-        catalogWidth = Math.min(dp(800), Math.max(dp(200), decor.getWidth() - dp(64)));
++        // Six cards across and about three rows down: the catalogue then reads down the screen instead of
++        // running off sideways, where a TV-sized catalogue of 80-odd apps was hard to search.
++        catalogWidth = Math.min(dp(900), Math.max(dp(320), decor.getWidth() - dp(80)));
+         int width = catalogWidth;
+-        int height = dp(280);
++        int height = dp(604);
+         popup = new PopupWindow(panel, width, height, true);
+         popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+         popup.setOutsideTouchable(true);
+@@ -201,7 +207,9 @@ final class AppLibraryDialog {
+         if (container.getLayoutParams() instanceof WindowManager.LayoutParams) {
+             WindowManager.LayoutParams params = (WindowManager.LayoutParams) container.getLayoutParams();
+             params.flags |= WindowManager.LayoutParams.FLAG_DIM_BEHIND;
+-            params.dimAmount = 0.55f;
++            // Enough dim that the header clock and the shelf behind stop competing with the pane, but not a black
++            // out: the pane is translucent, so the wallpaper is still what it is made of.
++            params.dimAmount = 0.5f;
+             activity.getWindowManager().updateViewLayout(container, params);
+         }
+         panel.setAlpha(0f);
+@@ -350,7 +358,7 @@ final class AppLibraryDialog {
+ 
+     private void showCatalog() {
+         stopHighlight();
+-        resize(catalogWidth, dp(280));
++        resize(catalogWidth, dp(604));
+         panel.removeAllViews();
+         LinearLayout header = new LinearLayout(activity);
+         header.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+@@ -392,9 +400,9 @@ final class AppLibraryDialog {
+         RecyclerView list = new RecyclerView(activity);
+         list.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+         catalog = list;
+-        list.setLayoutManager(new LinearLayoutManager(activity, RecyclerView.HORIZONTAL, false) {
+-            @Override protected boolean isLayoutRTL() { return rtl; }
+-        });
++        // Cards are 132dp wide plus 6dp either side; the panel width decides how many fit across.
++        columnsCount = Math.max(1, (catalogWidth - dp(20)) / dp(144));
++        list.setLayoutManager(new GridLayoutManager(activity, columnsCount));
+         list.setItemAnimator(null);
+         list.setOverScrollMode(View.OVER_SCROLL_NEVER);
+         list.setClipToPadding(false);
+@@ -408,6 +416,7 @@ final class AppLibraryDialog {
+         highlight.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+         shelf.addView(highlight, new FrameLayout.LayoutParams(dp(144), dp(180)));
+         scrollOffset = 0;
++        scrollOffsetY = 0;
+         spring = new SpringAnimation(highlight, new FloatPropertyCompat<View>("libraryScrollX") {
+             @Override public float getValue(View view) { return view.getTranslationX() + scrollOffset; }
+             @Override public void setValue(View view, float value) { view.setTranslationX(value - scrollOffset); }
+@@ -418,6 +427,9 @@ final class AppLibraryDialog {
+             @Override public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                 scrollOffset += dx;
+                 highlight.setTranslationX(highlight.getTranslationX() - dx);
++                // The grid scrolls down: the glass has to travel with its card, not stay behind on the row.
++                scrollOffsetY += dy;
++                highlight.setTranslationY(highlight.getTranslationY() - dy);
+             }
+         });
+         panel.addView(shelf, new LinearLayout.LayoutParams(-1, 0, 1));
+@@ -425,7 +437,7 @@ final class AppLibraryDialog {
+         for (int i = 0; i < apps.size(); i++) {
+             if (apps.get(i).activityInfo.packageName.equals(selectedPackage)) { position = i; break; }
+         }
+-        ((LinearLayoutManager) list.getLayoutManager()).scrollToPositionWithOffset(position, selectedOffset);
++        list.scrollToPosition(position);
+         final int target = position;
+         list.post(() -> {
+             if (catalog != list || !popup.isShowing()) return;
+@@ -655,7 +667,7 @@ final class AppLibraryDialog {
+             boolean recent = !selectionMode && LibraryApps.recent(installTimes.getOrDefault(pkg, 0L), catalogTime);
+             status.setText(home ? R.string.library_on_home : recent ? R.string.library_recent : R.string.library_add_home);
+             status.setVisibility(home || !okOpens ? View.VISIBLE : View.INVISIBLE);
+-            holder.itemView.setBackground(surface(home ? 0x1475BBA4 : 0x0CFFFFFF, 18));
++            holder.itemView.setBackground(surface(home ? 0x1F75BBA4 : 0x14FFFFFF, 18));
+             View check = holder.itemView.findViewById(R.id.dot);
+             check.getLayoutParams().width = dp(home ? 18 : 8);
+             check.getLayoutParams().height = dp(home ? 18 : 8);
+@@ -678,11 +690,23 @@ final class AppLibraryDialog {
+                 }
+             });
+             holder.itemView.setOnKeyListener((v, key, event) -> {
++                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                 int index = holder.getBindingAdapterPosition();
+-                return event.getAction() == KeyEvent.ACTION_DOWN && (key == KeyEvent.KEYCODE_DPAD_UP
+-                        || key == KeyEvent.KEYCODE_DPAD_DOWN
+-                        || (rtl ? key == KeyEvent.KEYCODE_DPAD_RIGHT : key == KeyEvent.KEYCODE_DPAD_LEFT) && index == 0
+-                        || (rtl ? key == KeyEvent.KEYCODE_DPAD_LEFT : key == KeyEvent.KEYCODE_DPAD_RIGHT) && index == apps.size() - 1);
++                if (index == RecyclerView.NO_POSITION) return false;
++                int last = apps.size() - 1;
++                // With rtl the grid mirrors its columns, so the edge column swaps with it.
++                int column = index % columnsCount;
++                boolean edgeStart = rtl ? column == columnsCount - 1 : column == 0;
++                boolean edgeEnd = rtl ? column == 0 : column == columnsCount - 1;
++                // Up and Down move through the rows; at an edge the key is swallowed, so focus never
++                // leaves the panel for the Home behind it.
++                switch (key) {
++                    case KeyEvent.KEYCODE_DPAD_UP: return index < columnsCount;
++                    case KeyEvent.KEYCODE_DPAD_DOWN: return index + columnsCount > last;
++                    case KeyEvent.KEYCODE_DPAD_LEFT: return edgeStart || index == 0;
++                    case KeyEvent.KEYCODE_DPAD_RIGHT: return edgeEnd || index == last;
++                    default: return false;
++                }
+             });
+         }
+         @Override public int getItemCount() { return apps.size(); }
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java b/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
+index fe821b9d..19a1ec16 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
+@@ -32,7 +32,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
+     private final boolean bandVisible;
+     /** single_row: the tiles after the dock share its row, so they take the same offsets to stay level with it. */
+     private final boolean singleRow;
+-    /** dock_band_all: in a single row, the band runs behind every app instead of the dock apps only. */
++    /** draw dock_band_all: in a single row, the band runs behind every app instead of the dock apps only. */
+     private final boolean bandAll;
+ 
+     /**
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/GlassPlateDrawable.java b/launcher/app/src/main/java/com/gathin/tvhome/GlassPlateDrawable.java
+new file mode 100644
+index 00000000..7afa74a2
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/GlassPlateDrawable.java
+@@ -0,0 +1,128 @@
++package com.gathin.tvhome;
++
++import android.graphics.Canvas;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.graphics.drawable.Drawable;
++import android.view.View;
++
++/**
++ * A pane of clear glass: the tile's own surface, drawn over whatever is behind it.
++ *
++ * It is deliberately not a picture. Sampling the wallpaper into the pane seemed the obvious way to show the
++ * scene through the glass, but a tile that draws the wallpaper cannot keep up with everything in front of the
++ * wallpaper — the cinematic scrim, the top fade — so it comes out lighter than its surroundings and the pane
++ * stops reading as glass at all. Leaving the pane empty does: the screen behind it is already the exact picture,
++ * and the pane only has to add what glass adds — a thin body, a specular sheen, a bright lip and a dark line
++ * just inside it where the thickness turns away.
++ */
++final class GlassPlateDrawable extends Drawable {
++
++    private final View host;
++    private final float density;
++    private float radius;
++
++    private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint sheen = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint lip = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint shade = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint tint = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint inner = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final RectF rect = new RectF();
++
++    /** The app's own colour, kept as a hint so the pane still reads as that app; 0 for none. */
++    private int baseColor;
++    /** 0 at rest, 1 focused: the pane is always glass, focus only brightens it and wakes its edge. */
++    private float emphasis;
++    private int drawableAlpha = 255;
++
++    GlassPlateDrawable(View host, float radius) {
++        this.host = host;
++        this.radius = radius;
++        this.density = host.getResources().getDisplayMetrics().density;
++        lip.setStyle(Paint.Style.STROKE);
++        lip.setStrokeWidth(1.3f * density);
++        inner.setStyle(Paint.Style.STROKE);
++        inner.setStrokeWidth(1f * density);
++    }
++
++    void setRadius(float radius) {
++        this.radius = radius;
++        invalidateSelf();
++    }
++
++    /** The colour of the app's tile, seen through the glass; 0 for none (a poster or banner tile). */
++    void setBaseColor(int color) {
++        this.baseColor = color;
++        invalidateSelf();
++    }
++
++    /** 0 at rest, 1 focused. */
++    void setEmphasis(float value) {
++        if (Math.abs(value - emphasis) < 0.01f) return;
++        emphasis = Math.max(0f, Math.min(1f, value));
++        invalidateSelf();
++    }
++
++    @Override
++    public void setBounds(int left, int top, int right, int bottom) {
++        super.setBounds(left, top, right, bottom);
++        rect.set(left, top, right, bottom);
++        float h = rect.height();
++        body.setShader(new LinearGradient(0, top, 0, bottom, 0x1CFFFFFF, 0x0AFFFFFF, Shader.TileMode.CLAMP));
++        sheen.setShader(new LinearGradient(0, top, 0, top + h * 0.48f, 0x30FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
++        // Light comes from above the screen: the top lip is bright, the sides fade, the bottom is barely there.
++        lip.setShader(new LinearGradient(0, top, 0, bottom, 0xF0FFFFFF, 0x2EFFFFFF, Shader.TileMode.CLAMP));
++        // Just inside the lip, a dark line fakes the pane's thickness where it turns away from the light.
++        shade.setShader(new LinearGradient(0, top, 0, bottom, 0x00FFFFFF, 0x33000000, Shader.TileMode.CLAMP));
++    }
++
++    @Override
++    public void draw(Canvas canvas) {
++        float top = rect.top, bottom = rect.bottom;
++        if (bottom <= top) return;
++        float a = drawableAlpha / 255f;
++
++        // A hint of the app's colour, not a fill: enough that a red app still reads as red through the pane.
++        if (baseColor != 0) {
++            tint.setColor(baseColor);
++            tint.setAlpha(Math.round((22 + 40 * emphasis) * a));
++            canvas.drawRoundRect(rect, radius, radius, tint);
++        }
++
++        body.setAlpha(Math.round((190 + 65 * emphasis) * a));
++        canvas.drawRoundRect(rect, radius, radius, body);
++
++        canvas.save();
++        canvas.clipRect(rect.left, top, rect.right, top + rect.height() * 0.48f);
++        sheen.setAlpha(Math.round((165 + 90 * emphasis) * a));
++        canvas.drawRoundRect(rect, radius, radius, sheen);
++        canvas.restore();
++
++        float inset = 1.5f * density;
++        shade.setAlpha(Math.round((90 + 120 * emphasis) * a));
++        canvas.drawRoundRect(rect.left + inset, top + inset, rect.right - inset, bottom - inset,
++                Math.max(0f, radius - inset), Math.max(0f, radius - inset), shade);
++
++        lip.setAlpha(Math.round((130 + 110 * emphasis) * a));
++        canvas.drawRoundRect(rect, radius, radius, lip);
++    }
++
++    @Override
++    public void setAlpha(int alpha) {
++        drawableAlpha = alpha;
++        invalidateSelf();
++    }
++
++    @Override
++    public void setColorFilter(android.graphics.ColorFilter colorFilter) {
++        // The pane is transparent by design: no filter is applied.
++    }
++
++    @Override
++    public int getOpacity() {
++        return android.graphics.PixelFormat.TRANSLUCENT;
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/GlassView.java b/launcher/app/src/main/java/com/gathin/tvhome/GlassView.java
+index 0fd2b6cd..d8edd372 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/GlassView.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/GlassView.java
+@@ -10,14 +10,19 @@ import android.util.AttributeSet;
+ import android.view.View;
+ 
+ /**
+- * A translucent glass slab: soft sheen fill, bright top specular, crisp rim and a faint outer glow.
+- * One instance floats over the grid and is moved with spring animations between tiles.
++ * The light that travels with focus: a soft halo, a bright lip and a specular sheen over the focused tile.
++ *
++ * Since the tile itself becomes the pane (see {@link GlassPlateDrawable}), this view no longer paints a body of
++ * its own: a white veil over frosted glass would only grey the picture out. What is left is what a real edge
++ * does — light gathers along the rim, strongest where it faces the room's light, and the top of the pane
++ * catches a sheen — which is what the eye reads as thickness.
+  */
+ public class GlassView extends View {
+ 
+     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final Paint specular = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Paint inner = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final RectF rect = new RectF();
+     private final float density;
+@@ -35,11 +40,14 @@ public class GlassView extends View {
+         density = getResources().getDisplayMetrics().density;
+         radius = 20f * density;
+         rim.setStyle(Paint.Style.STROKE);
+-        rim.setStrokeWidth(1.5f * density);
+-        rim.setColor(0xCCFFFFFF);
++        rim.setStrokeWidth(1.4f * density);
++        rim.setColor(0xE8FFFFFF);
++        inner.setStyle(Paint.Style.STROKE);
++        inner.setStrokeWidth(1f * density);
++        inner.setColor(0x1FFFFFFF);
+         glow.setStyle(Paint.Style.STROKE);
+         // Cache the slab as a texture. The spring only changes translation, so the GPU can
+-        // move it without replaying clipPath and the glow on every frame. That path is
++        // move it without replaying the rings and the clip on every frame. That path is
+         // software-rendered on the MT5895 and is what makes the highlight crawl.
+         setLayerType(LAYER_TYPE_HARDWARE, null);
+     }
+@@ -49,7 +57,7 @@ public class GlassView extends View {
+         if (argb == 0) {
+             glowRgb = 0xFFFFFF;
+             glowAlpha = 0x30;
+-            rim.setColor(0xCCFFFFFF);
++            rim.setColor(0xE8FFFFFF);
+         } else {
+             glowRgb = argb & 0xFFFFFF;
+             glowAlpha = 0x70;
+@@ -65,7 +73,7 @@ public class GlassView extends View {
+     void setStyle(String style) {
+         flat = Config.GLASS_RIM.equals(style) || Config.GLASS_HALO.equals(style);
+         halo = Config.GLASS_HALO.equals(style);
+-        rim.setStrokeWidth((flat ? 2f : 1.5f) * density);
++        rim.setStrokeWidth((flat ? 2f : 1.4f) * density);
+         invalidate();
+     }
+ 
+@@ -77,8 +85,11 @@ public class GlassView extends View {
+     @Override
+     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+         super.onSizeChanged(w, h, oldw, oldh);
+-        fill.setShader(new LinearGradient(0, 0, 0, h, 0x3DFFFFFF, 0x12FFFFFF, Shader.TileMode.CLAMP));
+-        specular.setShader(new LinearGradient(0, 0, 0, h * 0.45f, 0x66FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
++        // A film, not a body: just enough white to lift the picture a step, as glass does over a bright scene.
++        fill.setShader(new LinearGradient(0, 0, 0, h, 0x16FFFFFF, 0x06FFFFFF, Shader.TileMode.CLAMP));
++        specular.setShader(new LinearGradient(0, 0, 0, h * 0.42f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
++        // The lip is brightest at the top and fades down the sides: light comes from above the screen.
++        rim.setShader(new LinearGradient(0, 0, 0, h, 0xF2FFFFFF, 0x3DFFFFFF, Shader.TileMode.CLAMP));
+     }
+ 
+     @Override
+@@ -86,19 +97,19 @@ public class GlassView extends View {
+         float inset = 6f * density;   // room for the glow
+         rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
+ 
+-        // Outer glow: thin rings across the inset, each a little fainter, so it fades out smoothly. Three wide
+-        // strokes left visible bands once the glow took an app's colour at a stronger alpha. The hardware layer
++        // Outer halo: rings across the inset, each a little fainter, so it fades out smoothly. The hardware layer
+         // caches the result, so the rings cost one draw, not one per frame of the spring.
+         if (!flat || halo) {
+-            int rings = 12;
++            int rings = 16;
+             float step = inset / rings;
+             int alpha = flat ? glowAlpha / 2 : glowAlpha;
+-            glow.setStrokeWidth(step + 0.5f);
++            glow.setStrokeWidth(step + 0.6f);
+             for (int i = 0; i < rings; i++) {
+                 float o = step * (i + 0.5f);
+                 float t = 1f - (float) i / rings;
+-                glow.setColor(Math.round(alpha * t) << 24 | glowRgb);
+-                canvas.drawRoundRect(rect.left - o, rect.top - o, rect.right + o, rect.bottom + o, radius + o, radius + o, glow);
++                glow.setColor(Math.round(alpha * t * t) << 24 | glowRgb);
++                canvas.drawRoundRect(rect.left - o, rect.top - o, rect.right + o, rect.bottom + o,
++                        radius + o, radius + o, glow);
+             }
+         }
+         if (flat) {
+@@ -108,13 +119,17 @@ public class GlassView extends View {
+ 
+         canvas.drawRoundRect(rect, radius, radius, fill);
+ 
+-        // Sheen across the top 45%: clipRect stays on the GPU (clipPath did not on the MT5895) and
+-        // the round rect under it keeps the top corners rounded with a flat bottom edge.
++        // Sheen across the top: clipRect stays on the GPU (clipPath did not on the MT5895).
+         canvas.save();
+-        canvas.clipRect(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.45f);
++        canvas.clipRect(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.42f);
+         canvas.drawRoundRect(rect, radius, radius, specular);
+         canvas.restore();
+ 
+         canvas.drawRoundRect(rect, radius, radius, rim);
++
++        // A second, dimmer edge just inside the rim: the thickness of the pane turning away from the light.
++        float in = 1.6f * density;
++        canvas.drawRoundRect(rect.left + in, rect.top + in, rect.right - in, rect.bottom - in,
++                Math.max(0f, radius - in), Math.max(0f, radius - in), inner);
+     }
+ }
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+index ad32dfaf..78c48459 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+@@ -29,6 +29,7 @@ import android.graphics.drawable.BitmapDrawable;
+ import android.graphics.drawable.ColorDrawable;
+ import android.graphics.drawable.Drawable;
+ import android.graphics.drawable.GradientDrawable;
++import android.media.AudioManager;
+ import android.media.tv.TvContract;
+ import android.media.tv.TvInputInfo;
+ import android.media.tv.TvInputManager;
+@@ -106,6 +107,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     static final String ACTION_LAUNCHER_SETTINGS = "com.gathin.tvhome.action.LAUNCHER_SETTINGS";
+     /** The system input switcher, forwarded here by InputsRequestActivity while handle_view_inputs is on. */
+     static final String ACTION_VIEW_INPUTS = "com.android.tv.action.VIEW_INPUTS";
++    /** Opened by RemoteKeys for an app_keys entry of "library": the App library window, from a remote button. */
++    static final String ACTION_OPEN_LIBRARY = "com.gathin.tvhome.action.OPEN_LIBRARY";
+     /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
+     static int COLUMNS = 4;
+     private boolean rtlAppGrid;
+@@ -121,9 +124,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     private long settingsRevision;
+     /** Idle time on Home before ClockActivity; 0 is off (config.xml, home_idle_clock_minutes). */
+     private long idleClockMs;
++    /** How long the idle clock waits again when something is still playing sound (see maybeShowIdleClock). */
++    private static final long IDLE_CLOCK_SNOOZE_MS = 60_000L;
+     /** Back on Home opens ClockActivity (config.xml, back_opens_clock). */
+     private boolean backOpensClock;
+-    private final Runnable showIdleClock = () -> startActivity(new Intent(this, ClockActivity.class));
++    private final Runnable showIdleClock = this::maybeShowIdleClock;
+     private String liveTvAction;
+     private String liveTvInputId;
+     /** The app library is on (config.xml, app_library): only then can the tile menu take an app off Home. */
+@@ -174,6 +179,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     private int ambientColor = -1;
+     private ValueAnimator ambientAnimator;
+     private boolean heroShown;
++    /**
++     * Share of the last rows_below_dock row that stays on screen under the dock: the tvOS shelf shows the next
++     * row cut by the bottom edge, not a whole one. Used for the grid's top padding (the dock's rest height) and
++     * for the scroll that parks the dock at the top when the focus leaves it.
++     */
++    private static final float DOCK_PEEK_SHARE = 0.55f;
++    /**
++     * How long the shelf takes to get out of the way when the focus leaves the dock. Short on purpose: the grid
++     * starts rising at the same moment, and a slow fade left the name hanging over the tiles as they went by.
++     */
++    private static final int SHELF_COLLAPSE_MS = 110;
+     private boolean animations;
+     private boolean advancedEffects;
+     private TextView greeting;
+@@ -231,6 +247,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     private int glassCardW;   // width of the tile the glass was last fitted to
+     private boolean glassShown;
+     private final Rect tileRect = new Rect();
++    /** Used to read the dock's rest line: the grid's top plus its padding (see showHero). */
++    private final Rect heroRect = new Rect();
+     private final Rect revealRect = new Rect();
+     // Static so they survive the activity being destroyed while another app is open (low-memory TVs,
+     // or Developer options → "Don't keep activities"); they only reset when the process dies.
+@@ -679,11 +697,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             int tileW = AppAdapter.tileWidthPx(inner, h, COLUMNS, rowsBelowDock, cfg.dockTitle, cfg.dockRow, density);
+             int itemH = AppAdapter.itemHeightPx(AppAdapter.tileHeightPx(tileW), density);
+             int dockRow = itemH + (int) (AppAdapter.DOCK_EXTRA_DP * density);   // item height plus DockDecoration offsets
+-            int gridRows = itemH * rowsBelowDock;
++            // tvOS rest state: the dock sits low and the row under it is cut by the screen edge, so only the top
++            // DOCK_PEEK_SHARE of that last row is reserved. rows_below_dock counts the rows the grid shows under
++            // the dock, the last one running off the bottom.
++            int gridRows = rowsBelowDock <= 0 ? 0
++                    : (rowsBelowDock - 1) * itemH + Math.round(itemH * DOCK_PEEK_SHARE);
+             // Keep the hero below the header when the library is enabled on a short screen,
+             // even when the theme requests an extra visible row below the dock.
+             int shelfClearance = cfg.appLibrary ? hero.getMeasuredHeight() + (int) (40 * density) : 0;
+-            int want = Math.max(shelfClearance, h - dockRow - gridRows - (int) (AppAdapter.BOTTOM_ROOM_DP * density));
++            int want;
++            if (MainActivity.this.dockRow && rowsBelowDock <= 0) {
++                // rows_below_dock 0: the shelf is the dock, plus the tops of the row under it — enough that the
++                // next row reads as "there is more below", the way tvOS lets it peek, but nowhere near a full row.
++                // The item's own 8dp top padding sits inside that room, so 40dp leaves about 48px of tile tops.
++                want = Math.max(shelfClearance, h - itemH - Math.round(40 * density));
++            } else {
++                want = Math.max(shelfClearance, h - dockRow - gridRows - (int) (AppAdapter.BOTTOM_ROOM_DP * density));
++            }
+             // Where the rows cannot fit even at the smallest tile (3 rows with the title on), the title keeps its
+             // room above the dock and the last rows run off the bottom instead of the title drawing over the clock.
+             if (MainActivity.this.dockRow && cfg.dockTitle && rowsBelowDock > 0) want = Math.max(want, (int) (AppAdapter.TITLE_ROOM_DP * density));
+@@ -714,6 +744,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             }
+             // Cold start or column count > 4: the first focus can run before the grid has its final width or
+             // padding, leaving the glass at the XML design size until a key is pressed.
++            // The shelf sits on the dock's rest line, which is the grid's padding: put it back once that moves.
++            placeHeroOnDockLine();
+             grid.post(this::refitGlass);
+         });
+ 
+@@ -928,7 +960,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                     .build(), vpnCallback);
+         }
+         // Not after recreate(): the launch intent survives it and would open the settings again.
+-        if (savedInstanceState == null && !openLauncherSettingsIfAsked(getIntent())) openInputsIfAsked(getIntent());
++        if (savedInstanceState == null && !openLauncherSettingsIfAsked(getIntent())
++                && !openInputsIfAsked(getIntent())) {
++            openLibraryIfAsked(getIntent());
++        }
+     }
+ 
+     /**
+@@ -988,6 +1023,47 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         return true;
+     }
+ 
++    /**
++     * A remote button mapped to "library" in app_keys: the App library window, the same one the top-bar grid
++     * button opens. It is built from the tiles (it knows which apps are already on Home), so the first load has
++     * to be done first — a few frames at most; the cap keeps a Home that never loads from retrying forever.
++     */
++    private boolean openLibraryIfAsked(Intent intent) {
++        if (intent == null || !ACTION_OPEN_LIBRARY.equals(intent.getAction())) return false;
++        setIntent(new Intent(Intent.ACTION_MAIN));
++        // That button belongs to this Home. After a switch back the same intent can still reach this process — a
++        // stale mapping, an app that kept it — and opening the library would put this launcher on screen over the
++        // stock desktop, which reads as the desktop having changed itself. Leave instead: Home is not this app.
++        if (!isSoleHome()) {
++            finish();
++            return true;
++        }
++        if (appLibraryEnabled) openLibraryWhenReady(0);
++        return true;
++    }
++
++    /**
++     * True when no other Home activity is enabled. A disabled Home package is not returned by the query, so this
++     * says "the TV still boots into this launcher" rather than what the system currently prefers.
++     */
++    private boolean isSoleHome() {
++        Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
++        String me = getPackageName();
++        for (ResolveInfo info : getPackageManager().queryIntentActivities(home, 0)) {
++            if (info.activityInfo != null && !me.equals(info.activityInfo.packageName)) return false;
++        }
++        return true;
++    }
++
++    private void openLibraryWhenReady(int attempt) {
++        if (isFinishing() || appLibrary != null) return;
++        if (!tilesReady && attempt < 25) {
++            root.postDelayed(() -> openLibraryWhenReady(attempt + 1), 80);
++            return;
++        }
++        onLibraryRequested();
++    }
++
+     /**
+      * Home pressed while Home is already in front: singleTask delivers it here, then onResume runs.
+      * Back to the top with the first dock tile focused, like the stock launcher. Back from an app
+@@ -998,6 +1074,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         super.onNewIntent(intent);
+         if (openLauncherSettingsIfAsked(intent)) return;
+         if (openInputsIfAsked(intent)) return;
++        if (openLibraryIfAsked(intent)) return;
+         if (intent == null || !intent.hasCategory(Intent.CATEGORY_HOME)) return;
+         if (gameDay != null && !stopped) gameDay.read();
+         grid.scrollToPosition(0);
+@@ -1239,6 +1316,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         if (resumed && idleClockMs > 0) root.postDelayed(showIdleClock, idleClockMs);
+     }
+ 
++    /**
++     * The idle clock, but never over sound. The countdown only runs while Home is in front — onPause drops it — so
++     * a video app in front can never trip it, which was the worry. The remaining hole is an app that keeps its
++     * player running behind Home (radio, a music app, a video still casting): the screen is not idle there, and
++     * cutting to a clock over the audio is wrong. Snooze instead of showing, and let the next quiet minute decide.
++     */
++    private void maybeShowIdleClock() {
++        AudioManager audio = getSystemService(AudioManager.class);
++        if (audio != null && audio.isMusicActive()) {
++            root.postDelayed(showIdleClock, IDLE_CLOCK_SNOOZE_MS);
++            return;
++        }
++        startActivity(new Intent(this, ClockActivity.class));
++    }
++
+     @Override
+     protected void onPause() {
+         super.onPause();
+@@ -1806,17 +1898,40 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                 if (!animations || reducedMotion) grid.scrollBy(0, dy);
+                 else grid.smoothScrollBy(0, dy);
+             }
+-            showHero(position, scroll ? r.top - dy : r.top);
++            showHero(position);
+         } else {
+-            // Below the dock (or in a plain grid) the glow follows the tile without the big name; letting it
+-            // fade out left the grid on plain black.
+-            showGlowOnly(position);
++            // tvOS: the shelf lives with the dock's focus. Leaving it lifts the name away and lets the grid carry
++            // the dock up one row at a time — no jump to the top, the next row simply slides into view.
++            if (dockRow && !singleRow && heroShown) collapseShelf();
++            else showGlowOnly(position);
+             // Scroll just enough so the whole glass (not only the tile) is visible.
+             revealRect.set(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
+             grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
+         }
+     }
+ 
++    /**
++     * Lifts the shelf off the screen as the grid takes over: the name and the artwork rise a little and fade.
++     * Hiding them on the spot made the title blink out while the tiles were still on their way up.
++     */
++    private void collapseShelf() {
++        stopAmbientAnimation();
++        hero.animate().cancel();
++        ambient.animate().cancel();
++        heroArt.animate().cancel();
++        heroShown = false;
++        float lift = 40 * density;
++        if (animations && !reducedMotion) {
++            hero.animate().translationYBy(-lift).alpha(0f).setDuration(SHELF_COLLAPSE_MS).start();
++            heroArt.animate().alpha(0f).setDuration(SHELF_COLLAPSE_MS + 140).start();
++            if (ambientGlow) ambient.animate().alpha(0f).setDuration(SHELF_COLLAPSE_MS).start();
++        } else {
++            hero.setAlpha(0f);
++            heroArt.setAlpha(0f);
++            if (ambientGlow) ambient.setAlpha(0f);
++        }
++    }
++
+     /** Refits the glass to the focused holder once the grid layout and tile dimensions settle. */
+     private void refitGlass() {
+         if (isDestroyed() || adapter.appCount() == 0 || libraryFocusPending) return;
+@@ -1835,10 +1950,32 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+ 
+     // ---- top shelf -------------------------------------------------------------------------------
+ 
+-    private void showHero(int position, float dockTopInRoot) {
++    /** Where the shelf's bottom sits: on the dock's rest line, just above the dock row. */
++    private float dockLineY() {
++        Rect g = heroRect;
++        g.set(0, 0, 0, 0);
++        root.offsetDescendantRectToMyCoords(grid, g);
++        return g.top + grid.getPaddingTop() + 8 * density - 40 * density - hero.getHeight();
++    }
++
++    /**
++     * Puts the shelf back on the dock's rest line once the grid has been laid out again. On a cold start the first
++     * focus lands before the grid gets its padding, so the name stayed where it was first placed — over the clock.
++     */
++    private void placeHeroOnDockLine() {
++        if (!heroShown || !dockRow || hero.getVisibility() != View.VISIBLE) return;
++        // Mid-collapse (riding up) or already gone: showHero places it when the dock takes the focus back.
++        if (hero.getTranslationY() != 0f || hero.getAlpha() < 0.01f) return;
++        hero.setY(dockLineY());
++    }
++
++    private void showHero(int position) {
+         String label = adapter.labelAt(position);
+         int color = adapter.ambientColorAt(position);
+-        float y = dockTopInRoot - 14 * density - 26 * density - hero.getHeight();
++        // The dock's rest line, not the tile's rect as it happens to be mid-scroll: whether the shelf comes back
++        // from below or the grid has just been given its padding, the dock parks at this line, so the name lands
++        // in the same place every time instead of drawing over the clock on a cold start.
++        float y = dockLineY();
+         boolean changed = !label.contentEquals(heroName.getText());
+         if (cinematic && heroArtAlpha > 0f) showHeroArt(position);
+ 
+@@ -1848,6 +1985,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             hero.animate().cancel();
+             ambient.animate().cancel();
+             fillHero(position, label);
++            hero.setTranslationY(0f);
+             hero.setY(y);
+             hero.setTranslationX(0f);
+             hero.setAlpha(1f);
+@@ -1864,6 +2002,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             hero.animate().cancel();
+             ambient.animate().cancel();
+             fillHero(position, label);
++            hero.setTranslationY(0f);
+             hero.setY(y);
+             hero.setTranslationX(0f);
+             hero.animate().alpha(1f).setDuration(260).start();
+@@ -1876,6 +2015,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             if (advancedEffects) hero.animate().cancel();
+             hero.animate().alpha(0f).translationX(-12 * density).setDuration(120).withEndAction(() -> {
+                 fillHero(position, label);
++                hero.setTranslationY(0f);
+                 hero.setY(y);
+                 hero.setTranslationX(12 * density);
+                 hero.animate().alpha(1f).translationX(0f).setDuration(200).start();
+@@ -1889,6 +2029,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+                 }).start();
+             }
+         } else {
++            hero.setTranslationY(0f);
+             hero.setY(y);
+             // onPause cancels the fade-ins, and a second Home during one lands on the same tile, which starts none:
+             // finish them, or the shelf and the glow stay dim until focus moves to another app.
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/RemoteKeys.java b/launcher/app/src/main/java/com/gathin/tvhome/RemoteKeys.java
+index 6137c6a7..9ca26b0f 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/RemoteKeys.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/RemoteKeys.java
+@@ -343,7 +343,7 @@ final class RemoteKeys {
+     static boolean isAction(String target) {
+         switch (target) {
+             case "back": case "home": case "recents": case "mute": case "sleep":
+-            case "screensaver": case "settings": case "wifi": case "ignore":
++            case "screensaver": case "settings": case "wifi": case "library": case "ignore":
+                 return true;
+             default:
+                 return false;
+@@ -379,6 +379,10 @@ final class RemoteKeys {
+             case "wifi":
+                 start(ctx, SystemSettings.intent(ctx, Settings.ACTION_WIFI_SETTINGS));
+                 break;
++            case "library":
++                // Home's App library: the whole app list, over Home, from a button that had nothing to do.
++                start(ctx, new Intent(ctx, MainActivity.class).setAction(MainActivity.ACTION_OPEN_LIBRARY));
++                break;
+             default:
+                 break;   // "ignore", or "sleep" below Android 9: consumed, nothing to do
+         }
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/ServiceRepair.java b/launcher/app/src/main/java/com/gathin/tvhome/ServiceRepair.java
+index 8ee8afd8..187168ee 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/ServiceRepair.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/ServiceRepair.java
+@@ -4,8 +4,10 @@ import android.Manifest;
+ import android.content.ComponentName;
+ import android.content.ContentResolver;
+ import android.content.Context;
++import android.content.Intent;
+ import android.content.SharedPreferences;
+ import android.content.pm.PackageManager;
++import android.content.pm.ResolveInfo;
+ import android.provider.Settings;
+ 
+ import java.util.ArrayList;
+@@ -37,6 +39,13 @@ final class ServiceRepair {
+     static void restore(Context context) {
+         if (context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS)
+                 != PackageManager.PERMISSION_GRANTED) return;
++        // Only while this launcher is still the TV's Home. Once the stock desktop is enabled again this process
++        // can still be started — by a leftover mapping, by an app, by the switcher itself — and putting the key
++        // filter back then would leave it swallowing buttons under the other desktop: a mapping that belongs to
++        // this Home would keep firing there, and the app_keys "library" action would pull this launcher (and its
++        // app library) up over the stock Home. The record is kept, so a real force stop under this Home still
++        // repairs itself; under the other Home it just stays dormant until the switch back.
++        if (!isOnlyHome(context)) return;
+         try {
+             ContentResolver cr = context.getContentResolver();
+             String list = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+@@ -101,6 +110,25 @@ final class ServiceRepair {
+                 && Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, updated);
+     }
+ 
++    /**
++     * True when no other Home activity is enabled, i.e. this launcher is still what the TV boots into. A disabled
++     * Home package is not returned by the query, so right after a switch back the stock launcher shows up here.
++     * Anything unexpected reads as "not ours", because enabling a system-wide key filter in the wrong Home is
++     * worse than leaving it off until the next switch.
++     */
++    private static boolean isOnlyHome(Context context) {
++        try {
++            Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
++            String me = context.getPackageName();
++            for (ResolveInfo info : context.getPackageManager().queryIntentActivities(home, 0)) {
++                if (info.activityInfo != null && !me.equals(info.activityInfo.packageName)) return false;
++            }
++            return true;
++        } catch (RuntimeException e) {
++            return false;
++        }
++    }
++
+     private static SharedPreferences prefs(Context context) {
+         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+     }
+diff --git a/launcher/app/src/main/res/drawable/glass_panel.xml b/launcher/app/src/main/res/drawable/glass_panel.xml
+index c1d13629..ee7df4a1 100644
+--- a/launcher/app/src/main/res/drawable/glass_panel.xml
++++ b/launcher/app/src/main/res/drawable/glass_panel.xml
+@@ -1,10 +1,26 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!--
++  The App library's pane: the same liquid glass the Home tiles are made of. It is translucent on purpose — the
++  shelf behind it (wallpaper, tiles) shows through the tint, with a white sheen across the top and a bright
++  hairline rim for thickness. An opaque panel here read as a different launcher.
++-->
+ <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+     <item>
+         <shape android:shape="rectangle">
+-            <gradient android:angle="270" android:startColor="#FF2A2A2E" android:endColor="#FF161618" />
+-            <stroke android:width="1dp" android:color="#33FFFFFF" />
+-            <corners android:radius="20dp" />
++            <gradient android:angle="270" android:startColor="#B4232A33" android:endColor="#A00D1014" />
++            <corners android:radius="24dp" />
++        </shape>
++    </item>
++    <item>
++        <shape android:shape="rectangle">
++            <gradient android:angle="270" android:startColor="#1FFFFFFF" android:endColor="#00FFFFFF" />
++            <corners android:radius="24dp" />
++        </shape>
++    </item>
++    <item>
++        <shape android:shape="rectangle">
++            <stroke android:width="1dp" android:color="#3DFFFFFF" />
++            <corners android:radius="24dp" />
+         </shape>
+     </item>
+ </layer-list>
+diff --git a/launcher/app/src/main/res/drawable/ic_apps.xml b/launcher/app/src/main/res/drawable/ic_apps.xml
+index 36d9edeb..81d3e284 100644
+--- a/launcher/app/src/main/res/drawable/ic_apps.xml
++++ b/launcher/app/src/main/res/drawable/ic_apps.xml
+@@ -1,7 +1,9 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!-- App library: a 3x3 grid of small rounded squares, one path with light, even shapes so it reads as a
++     symbol rather than as a filled Android icon (ic_apps_pill insets this into the pill). -->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+     android:width="22dp" android:height="22dp"
+     android:viewportWidth="24" android:viewportHeight="24">
+     <path android:fillColor="#FFFFFFFF"
+-        android:pathData="M4,4h4v4H4zM10,4h4v4h-4zM16,4h4v4h-4zM4,10h4v4H4zM10,10h4v4h-4zM16,10h4v4h-4zM4,16h4v4H4zM10,16h4v4h-4zM16,16h4v4h-4z" />
++        android:pathData="M3.85,2.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M10.85,2.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M17.85,2.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M3.85,9.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M10.85,9.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M17.85,9.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M3.85,16.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M10.85,16.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z M17.85,16.70 h2.30 a1.15,1.15 0 0 1 1.15,1.15 v2.30 a1.15,1.15 0 0 1 -1.15,1.15 h-2.30 a1.15,1.15 0 0 1 -1.15,-1.15 v-2.30 a1.15,1.15 0 0 1 1.15,-1.15 z" />
+ </vector>
+diff --git a/launcher/app/src/main/res/drawable/ic_apps_grid.xml b/launcher/app/src/main/res/drawable/ic_apps_grid.xml
+new file mode 100644
+index 00000000..6d7f24c4
+--- /dev/null
++++ b/launcher/app/src/main/res/drawable/ic_apps_grid.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- App library for the round top-bar button: the same 3x3 of rounded squares as ic_apps, drawn at 16/24
++     instead of 19.6/24. In the header it sits beside the thin Wi-Fi arcs and the gear, and the full-size
++     glyph read a step heavier than those two; this keeps the grid readable without claiming more weight. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="22dp" android:height="22dp"
++    android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FFFFFFFF"
++        android:pathData="M4.00,5.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M10.00,5.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M16.00,5.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M4.00,11.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M10.00,11.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M16.00,11.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M4.00,17.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M10.00,17.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z M16.00,17.20 h1.60 a1.2,1.2 0 0 1 1.2,1.2 v1.60 a1.2,1.2 0 0 1 -1.2,1.2 h-1.60 a1.2,1.2 0 0 1 -1.2,-1.2 v-1.60 a1.2,1.2 0 0 1 1.2,-1.2 z" />
++</vector>
+diff --git a/launcher/app/src/main/res/drawable/ic_settings.xml b/launcher/app/src/main/res/drawable/ic_settings.xml
+index 376889dc..107f21c9 100644
+--- a/launcher/app/src/main/res/drawable/ic_settings.xml
++++ b/launcher/app/src/main/res/drawable/ic_settings.xml
+@@ -1,7 +1,29 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!--
++  Settings gear, hollowed out the way the iOS Settings icon is: a rim of fine teeth with nothing filled in behind it,
++  three spokes dropping from the rim to a pierced hub, wallpaper showing through every gap. At 22dp the earlier solid
++  cog was a white cookie — the eye needs that open middle to read it as a gear at 44 px. Radii were picked by
++  rasterising 18/20-tooth variants at device size: thinner (7.0 hole) went spindly, thicker (6.2) closed up.
++-->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+     android:width="22dp" android:height="22dp"
+     android:viewportWidth="24" android:viewportHeight="24">
+-    <path android:fillColor="#FFFFFFFF"
+-        android:pathData="M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z" />
++
++    <!-- rim: twenty teeth at 9.90/8.70, punched through to a 6.5 radius so the middle stays empty -->
++    <path
++        android:pathData="M11.15,2.14 A9.9,9.9 0 0,1 12.85,2.14 A8.7,8.7 0 0,1 13.96,3.52 A9.9,9.9 0 0,1 14.24,2.36 A9.9,9.9 0 0,1 15.86,2.88 A8.7,8.7 0 0,1 16.49,4.55 A9.9,9.9 0 0,1 17.11,3.52 A9.9,9.9 0 0,1 18.49,4.52 A8.7,8.7 0 0,1 18.57,6.30 A9.9,9.9 0 0,1 19.48,5.51 A9.9,9.9 0 0,1 20.48,6.89 A8.7,8.7 0 0,1 20.01,8.61 A9.9,9.9 0 0,1 21.12,8.14 A9.9,9.9 0 0,1 21.64,9.76 A8.7,8.7 0 0,1 20.67,11.25 A9.9,9.9 0 0,1 21.86,11.15 A9.9,9.9 0 0,1 21.86,12.85 A8.7,8.7 0 0,1 20.48,13.96 A9.9,9.9 0 0,1 21.64,14.24 A9.9,9.9 0 0,1 21.12,15.86 A8.7,8.7 0 0,1 19.45,16.49 A9.9,9.9 0 0,1 20.48,17.11 A9.9,9.9 0 0,1 19.48,18.49 A8.7,8.7 0 0,1 17.70,18.57 A9.9,9.9 0 0,1 18.49,19.48 A9.9,9.9 0 0,1 17.11,20.48 A8.7,8.7 0 0,1 15.39,20.01 A9.9,9.9 0 0,1 15.86,21.12 A9.9,9.9 0 0,1 14.24,21.64 A8.7,8.7 0 0,1 12.75,20.67 A9.9,9.9 0 0,1 12.85,21.86 A9.9,9.9 0 0,1 11.15,21.86 A8.7,8.7 0 0,1 10.04,20.48 A9.9,9.9 0 0,1 9.76,21.64 A9.9,9.9 0 0,1 8.14,21.12 A8.7,8.7 0 0,1 7.51,19.45 A9.9,9.9 0 0,1 6.89,20.48 A9.9,9.9 0 0,1 5.51,19.48 A8.7,8.7 0 0,1 5.43,17.70 A9.9,9.9 0 0,1 4.52,18.49 A9.9,9.9 0 0,1 3.52,17.11 A8.7,8.7 0 0,1 3.99,15.39 A9.9,9.9 0 0,1 2.88,15.86 A9.9,9.9 0 0,1 2.36,14.24 A8.7,8.7 0 0,1 3.33,12.75 A9.9,9.9 0 0,1 2.14,12.85 A9.9,9.9 0 0,1 2.14,11.15 A8.7,8.7 0 0,1 3.52,10.04 A9.9,9.9 0 0,1 2.36,9.76 A9.9,9.9 0 0,1 2.88,8.14 A8.7,8.7 0 0,1 4.55,7.51 A9.9,9.9 0 0,1 3.52,6.89 A9.9,9.9 0 0,1 4.52,5.51 A8.7,8.7 0 0,1 6.30,5.43 A9.9,9.9 0 0,1 5.51,4.52 A9.9,9.9 0 0,1 6.89,3.52 A8.7,8.7 0 0,1 8.61,3.99 A9.9,9.9 0 0,1 8.14,2.88 A9.9,9.9 0 0,1 9.76,2.36 A8.7,8.7 0 0,1 11.25,3.33 Z M5.50,12.00 A6.5,6.5 0 1,0 18.50,12.00 A6.5,6.5 0 1,0 5.50,12.00 Z"
++        android:fillColor="#FFFFFFFF"
++        android:fillType="evenOdd" />
++
++    <!-- three spokes, rim to hub, open space between them -->
++    <path
++        android:pathData="M12.00,10.25 L12.00,5.45 M13.52,12.88 L17.67,15.27 M10.48,12.88 L6.33,15.27"
++        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.25"
++        android:strokeLineCap="round" />
++
++    <!-- pierced hub -->
++    <path
++        android:pathData="M10.15,12.00 A1.85,1.85 0 1,0 13.85,12.00 A1.85,1.85 0 1,0 10.15,12.00 Z M11.20,12.00 A0.80,0.80 0 1,0 12.80,12.00 A0.80,0.80 0 1,0 11.20,12.00 Z"
++        android:fillColor="#FFFFFFFF"
++        android:fillType="evenOdd" />
+ </vector>
+diff --git a/launcher/app/src/main/res/drawable/ic_wifi.xml b/launcher/app/src/main/res/drawable/ic_wifi.xml
+index ecc3c8c0..999c2be9 100644
+--- a/launcher/app/src/main/res/drawable/ic_wifi.xml
++++ b/launcher/app/src/main/res/drawable/ic_wifi.xml
+@@ -1,7 +1,25 @@
+ <?xml version="1.0" encoding="utf-8"?>
++<!--
++  Wi-Fi as the Apple symbol draws it: three arcs of even weight sharing one centre with the dot under them, round
++  ends, sized so the glyph sits on the same optical line as the gear next to it. Strokes rather than a filled
++  Android icon, which at 22dp turns into a solid wedge.
++-->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+     android:width="22dp" android:height="22dp"
+     android:viewportWidth="24" android:viewportHeight="24">
+-    <path android:fillColor="#FFFFFFFF"
+-        android:pathData="M1,9l2,2c4.97,-4.97 13.03,-4.97 18,0l2,-2C16.93,2.93 7.08,2.93 1,9zM9,17l3,3 3,-3c-1.65,-1.66 -4.34,-1.66 -6,0zM5,13l2,2c2.76,-2.76 7.24,-2.76 10,0l2,-2C15.14,9.14 8.87,9.14 5,13z" />
++    <path
++        android:pathData="M4.43,9.28 A11.1,11.1 0 0,1 19.57,9.28"
++        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.9"
++        android:strokeLineCap="round" android:fillColor="#00000000" />
++    <path
++        android:pathData="M6.75,11.77 A7.7,7.7 0 0,1 17.25,11.77"
++        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.9"
++        android:strokeLineCap="round" android:fillColor="#00000000" />
++    <path
++        android:pathData="M9.07,14.26 A4.3,4.3 0 0,1 14.93,14.26"
++        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.9"
++        android:strokeLineCap="round" android:fillColor="#00000000" />
++    <path
++        android:pathData="M10.45,17.4 A1.55,1.55 0 0,1 13.55,17.4 A1.55,1.55 0 0,1 10.45,17.4"
++        android:fillColor="#FFFFFFFF" />
+ </vector>
+diff --git a/launcher/app/src/main/res/layout/activity_main.xml b/launcher/app/src/main/res/layout/activity_main.xml
+index 70c6de30..e89a91ad 100644
+--- a/launcher/app/src/main/res/layout/activity_main.xml
++++ b/launcher/app/src/main/res/layout/activity_main.xml
+@@ -212,9 +212,14 @@
+                         android:format12Hour="h:mm"
+                         android:format24Hour="HH:mm"
+                         android:textColor="#FFFFFFFF"
+-                        android:textSize="52sp"
++                        android:textSize="48sp"
+                         android:fontFamily="@string/font_light"
+-                        android:letterSpacing="-0.04"
++                        android:letterSpacing="-0.035"
++                        android:fontFeatureSettings="'tnum'"
++                        android:shadowColor="#66000000"
++                        android:shadowDx="0"
++                        android:shadowDy="1"
++                        android:shadowRadius="6"
+                         android:includeFontPadding="false" />
+ 
+                     <TextClock
+@@ -277,10 +282,14 @@
+                             android:format12Hour="@string/date_format_home"
+                             android:format24Hour="@string/date_format_home"
+                             android:textColor="#A6FFFFFF"
+-                            android:textSize="14sp"
++                            android:textSize="13sp"
+                             android:fontFamily="@string/font_regular"
+-                            android:letterSpacing="0.14"
+-                            android:textAllCaps="true" />
++                            android:letterSpacing="0.06"
++                            android:includeFontPadding="false"
++                            android:shadowColor="#66000000"
++                            android:shadowDx="0"
++                            android:shadowDy="1"
++                            android:shadowRadius="5" />
+ 
+                         <!-- Lunar date ("Lunar 13/9 · Year of the Horse"), shown when lunar_date is on. -->
+                         <TextView
+@@ -369,7 +378,7 @@
+                     style="@style/TopButtonIcon"
+                     android:visibility="gone"
+                     android:contentDescription="@string/app_library"
+-                    android:drawableStart="@drawable/ic_apps_pill"
++                    android:drawableStart="@drawable/ic_apps_grid"
+                     android:nextFocusDown="@+id/grid" />
+ 
+                 <TextView
+diff --git a/launcher/app/src/main/res/layout/item_app.xml b/launcher/app/src/main/res/layout/item_app.xml
+index d445bf77..bdf4418a 100644
+--- a/launcher/app/src/main/res/layout/item_app.xml
++++ b/launcher/app/src/main/res/layout/item_app.xml
+@@ -64,5 +64,9 @@
+         android:textColor="#F2FFFFFF"
+         android:textSize="14sp"
+         android:fontFamily="@string/font_medium"
+-        android:letterSpacing="0.02" />
++        android:letterSpacing="0.02"
++        android:shadowColor="#B3000000"
++        android:shadowDx="0"
++        android:shadowDy="1"
++        android:shadowRadius="5" />
+ </FrameLayout>
+diff --git a/launcher/app/src/main/res/values-zh-rCN/strings.xml b/launcher/app/src/main/res/values-zh-rCN/strings.xml
+index c19bf59f..7330f109 100644
+--- a/launcher/app/src/main/res/values-zh-rCN/strings.xml
++++ b/launcher/app/src/main/res/values-zh-rCN/strings.xml
+@@ -50,7 +50,7 @@
+     <string name="not_available">此电视不支持该功能</string>
+     <string name="cant_open">无法打开 %1$s</string>
+     <string name="date_format">M月d日 EEEE</string>
+-    <string name="date_format_home">M月d日 EEEE</string>
++    <string name="date_format_home">yyyy年M月d日 EEEE</string>
+     <string name="stats_cpu">CPU %1$d%%</string>
+     <string name="stats_memory">内存 %1$d / %2$d MB</string>
+     <string name="stats_storage">存储剩余 %1$s</string>
+diff --git a/launcher/app/src/main/res/values/config.xml b/launcher/app/src/main/res/values/config.xml
+index 42b73d75..4f5bcae8 100644
+--- a/launcher/app/src/main/res/values/config.xml
++++ b/launcher/app/src/main/res/values/config.xml
+@@ -200,7 +200,8 @@
+          for HDMI 3 on a TCL Smart TV Pro; the ids are in `tools/tv.py 'dumpsys tv_input'` (hdmi_port=N under
+          TvInputHardwareInfo). An action word in place of a package runs that action instead: back, home, recents,
+          mute (toggles the sound, with the TV's volume bar), sleep (standby, Android 9 and later), screensaver (the
+-         one chosen in the TV's settings, or the launcher's clock), settings, wifi or ignore (swallows the button: it
++         one chosen in the TV's settings, or the launcher's clock), library (Home's App library, the whole app list
++         over Home), settings, wifi or ignore (swallows the button: it
+          does nothing, for a shortcut pressed by accident; find its scancode with `tools/tv.py 'getevent -t'`);
+          e.g. KEYCODE_PROG_YELLOW:mute, scan:586:ignore and hold:KEYCODE_PROG_YELLOW:sleep. "package/.Activity" opens that activity instead of the app's launcher
+          entry, e.g. hold:191:io.github.maxhayim.brightness/.QuickActivity for an add-on's quick bar. Prefix an
