@@ -17,6 +17,7 @@ thing, go get the real thing first.
 | Launcher, theme loader, dock logic, screensaver plumbing | CleanYourTV |
 | Glass plate renderer, redrawn line icons, top bar layout | This repo |
 | Idle-clock idle detection and the Home guard in `ServiceRepair` | This repo |
+| The gear, Wi-Fi and 3x3 grid line icons | Drawn here as vector paths in `res/drawable/`, no icon pack, no traced artwork |
 | The Outfit typeface | The Outfit Project Authors, SIL OFL 1.1, bundled by CleanYourTV |
 | The wallpaper in the screenshots | Generated for this repo, no third-party images |
 
