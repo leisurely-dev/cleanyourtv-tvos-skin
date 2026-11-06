@@ -31,6 +31,8 @@ Pass means I saw it work. Anything I only reasoned about is marked as such rathe
 | Left/Right stops at both ends without wrapping to the wrong row | Pass |
 | Up from the first row lands on the top bar, not off screen | Pass |
 | Up from the shelf goes to the row above, not the top bar | Pass |
+| Down from the top bar returns to where focus left the grid | Pass |
+| Focus survives a wallpaper re-sample mid-scroll | Pass, on this build |
 | Long press on a tile with the real remote opens the tile menu | Pass |
 | Long press injected with `input keyevent --longpress` | Fails on this build, arrives as a short press. Known Android TV problem, not this patch; use the remote or `sendevent`. |
 
