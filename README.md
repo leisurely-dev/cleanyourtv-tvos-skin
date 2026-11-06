@@ -110,6 +110,9 @@ don't work, are in [docs/TESTED.md](docs/TESTED.md).
 - The dock-to-row transition is a fade, not the slide tvOS does. Doing it properly needs a layout pass I
   have not written.
 - Non-Latin app names get tighter tile padding than Latin ones. It is readable, it is just not even.
+- The fade under the shelf is one row tall. With `rows_below_dock` above 1 on a short grid the third row
+  can disappear under the dock instead of fading, so keep it at 0 or 1 on a 1080p set until the fade is
+  measured off the real gap.
 - The clock only shows in 24-hour style on a 24-hour TV unless you set `clock_format`.
 - Everything here was tuned on a 1080p panel. It should scale, but I have not seen it on a 4K set.
 
