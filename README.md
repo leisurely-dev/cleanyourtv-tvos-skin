@@ -94,6 +94,12 @@ app's art, which is fine for a photo-heavy wallpaper and not what you want if yo
 on purpose. And a wallpaper collection needs at least two images in `wallpapers/` or the launcher drops
 the wallpaper entirely and draws its built-in gradient instead.
 
+## A note on the 576 KiB gate
+
+Upstream sets the release APK limit at 576 KiB, and `docs/INSTALL.md` writes it as 589,824 bytes without
+saying why. It is the same number either way; the document now gives both, so nobody has to divide at the
+terminal to check whether their build fits.
+
 ## What I tested
 
 Short version: on one real TV, through a lot of reboots. The details, including the things that still
